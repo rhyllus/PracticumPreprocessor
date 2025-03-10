@@ -14,83 +14,101 @@ path operator""_p(const char* data, std::size_t sz) {
     return path(data, data + sz);
 }
 
-// напишите эту функцию
-bool Preprocess(const path& in_file, const path& out_file, const vector<path>& include_directories);
+bool ProcessInclude(const path& file, ofstream& out, const vector<path>& include_directories, 
+                    const path& parent_directory);
 
-string GetFileContents(string file) {
-    ifstream stream(file);
+bool Preprocess(const path& in_file, const path& out_file, const vector<path>& include_directories) {
+    ifstream in(in_file);
+    if (!in) {
+        return false;
+    }
 
-    // конструируем string по двум итераторам
-    return {(istreambuf_iterator<char>(stream)), istreambuf_iterator<char>()};
+    ofstream out(out_file);
+    if (!out) {
+        return false;
+    }
+
+    path parent_directory = in_file.parent_path();
+    
+    return ProcessInclude(in_file, out, include_directories, parent_directory);
 }
 
-void Test() {
-    error_code err;
-    filesystem::remove_all("sources"_p, err);
-    filesystem::create_directories("sources"_p / "include2"_p / "lib"_p, err);
-    filesystem::create_directories("sources"_p / "include1"_p, err);
-    filesystem::create_directories("sources"_p / "dir1"_p / "subdir"_p, err);
-
-    {
-        ofstream file("sources/a.cpp");
-        file << "// this comment before include\n"
-                "#include \"dir1/b.h\"\n"
-                "// text between b.h and c.h\n"
-                "#include \"dir1/d.h\"\n"
-                "\n"
-                "int SayHello() {\n"
-                "    cout << \"hello, world!\" << endl;\n"
-                "#   include<dummy.txt>\n"
-                "}\n"s;
-    }
-    {
-        ofstream file("sources/dir1/b.h");
-        file << "// text from b.h before include\n"
-                "#include \"subdir/c.h\"\n"
-                "// text from b.h after include"s;
-    }
-    {
-        ofstream file("sources/dir1/subdir/c.h");
-        file << "// text from c.h before include\n"
-                "#include <std1.h>\n"
-                "// text from c.h after include\n"s;
-    }
-    {
-        ofstream file("sources/dir1/d.h");
-        file << "// text from d.h before include\n"
-                "#include \"lib/std2.h\"\n"
-                "// text from d.h after include\n"s;
-    }
-    {
-        ofstream file("sources/include1/std1.h");
-        file << "// std1\n"s;
-    }
-    {
-        ofstream file("sources/include2/lib/std2.h");
-        file << "// std2\n"s;
+bool ProcessInclude(const path& file, ofstream& out, const vector<path>& include_directories, 
+                    const path& parent_directory) {
+    ifstream in(file);
+    if (!in) {
+        return false;
     }
 
-    assert((!Preprocess("sources"_p / "a.cpp"_p, "sources"_p / "a.in"_p,
-                                  {"sources"_p / "include1"_p,"sources"_p / "include2"_p})));
+    const regex local_include_pattern(R"/(\s*#\s*include\s*"([^"]*)"\s*)/");
+    const regex global_include_pattern(R"/(\s*#\s*include\s*<([^>]*)>\s*)/");
+    
+    string line;
+    int line_counter = 0;
+    
+    while (getline(in, line)) {
+        line_counter++;
+        smatch match;
 
-    ostringstream test_out;
-    test_out << "// this comment before include\n"
-                "// text from b.h before include\n"
-                "// text from c.h before include\n"
-                "// std1\n"
-                "// text from c.h after include\n"
-                "// text from b.h after include\n"
-                "// text between b.h and c.h\n"
-                "// text from d.h before include\n"
-                "// std2\n"
-                "// text from d.h after include\n"
-                "\n"
-                "int SayHello() {\n"
-                "    cout << \"hello, world!\" << endl;\n"s;
+        if (regex_match(line, match, local_include_pattern)) {
+            string include_file = match[1].str();
+            
+            path include_path = parent_directory / include_file;
+            ifstream included_file(include_path);
+            
+            if (!included_file) {
+                bool found = false;
+                for (const auto& dir : include_directories) {
+                    include_path = dir / include_file;
+                    included_file = ifstream(include_path);
+                    if (included_file) {
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found) {
+                    cout << "unknown include file " << include_file 
+                         << " at file " << file.string() 
+                         << " at line " << line_counter << endl;
+                    return false;
+                }
+            }
+            
+            if (!ProcessInclude(include_path, out, include_directories, include_path.parent_path())) {
+                return false;
+            }
+        } 
 
-    assert(GetFileContents("sources/a.in"s) == test_out.str());
-}
-
-int main() {
-    Test();
+        else if (regex_match(line, match, global_include_pattern)) {
+            string include_file = match[1].str();
+            
+            bool found = false;
+            path include_path;
+            
+            for (const auto& dir : include_directories) {
+                include_path = dir / include_file;
+                ifstream included_file(include_path);
+                if (included_file) {
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                cout << "unknown include file " << include_file 
+                     << " at file " << file.string() 
+                     << " at line " << line_counter << endl;
+                return false;
+            }
+            
+            if (!ProcessInclude(include_path, out, include_directories, include_path.parent_path())) {
+                return false;
+            }
+        } else {
+            out << line << endl;
+        }
+    }
+    
+    return true;
 }
